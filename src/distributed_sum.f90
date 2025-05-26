@@ -1,7 +1,8 @@
 module distributed_sum
 
     use mpi, only: MPI_COMM_WORLD, MPI_INTEGER, MPI_DOUBLE_PRECISION, MPI_ALLREDUCE, &
-        MPI_MAX, MPI_STATUS_SIZE, MPI_Sendrecv, MPI_STATUS_IGNORE
+        MPI_MAX, MPI_STATUS_SIZE, MPI_Sendrecv, MPI_STATUS_IGNORE, MPI_Get_count, &
+        MPI_Send, MPI_Recv
     use mpi_env, only: mpi_rank, mpi_size
     use round_robin, only: get_round_robin_turnament_schedule
 
@@ -24,8 +25,11 @@ module distributed_sum
         integer, dimension(:), pointer :: package => null()
     end type idx_list_package
 
-    ! max package size in real(kind=8) bit units
-    integer, parameter :: MAX_PACKAGE_LEN = 1000000
+    !> max package size in real(kind=8) bit units
+    integer, parameter :: MAX_PACKAGE_LEN = 4
+
+    !> flag for enabling buffered exchange of matrix elements (memory efficient)
+    logical, parameter :: flag_exchange_buffered = .true.
 
 contains
 
@@ -121,9 +125,17 @@ contains
             call unpack_idx_lists(my_offering, my_offer)
 
             ! send and recv buffer
-            call exchange_matrix_elements(oponent, my_offer, oponent_offer, &
-                                          idx_list_1, idx_list_2, end_idx_list_1, end_idx_list_2, &
-                                          loc_mat, end_mat)
+            if (flag_exchange_buffered) then
+                call exchange_matrix_elements_buffered(oponent, my_offer, oponent_offer, &
+                                                       idx_list_1, idx_list_2, &
+                                                       end_idx_list_1, end_idx_list_2, &
+                                                       loc_mat, end_mat)
+            else
+                call exchange_matrix_elements(oponent, my_offer, oponent_offer, &
+                                              idx_list_1, idx_list_2, &
+                                              end_idx_list_1, end_idx_list_2, &
+                                              loc_mat, end_mat)
+            end if
 
         end do
 
@@ -136,6 +148,9 @@ contains
         deallocate(recv_end_package)
         deallocate(oponent_offering)
     end subroutine sum_and_redistribute
+
+
+
 
     subroutine print_matrix(mat, idx_list_1, idx_list_2)
         real(kind=8), dimension(:, :), intent(in) :: mat
@@ -151,8 +166,8 @@ contains
             end do
         end do
     end subroutine print_matrix
-    
-    
+
+
 
     !> @brief allocate, initialize and fill the end matrix with the local matrix
     !!
@@ -220,8 +235,12 @@ contains
         real(kind=8), dimension(:,:), allocatable :: send_buffer
         real(kind=8), dimension(:,:), allocatable :: recv_buffer
 
-        ! prepare sendbuffer
+        ! check if there is anything to exchange
         send_size = my_offer%n_dim_1 * my_offer%n_dim_2
+        recv_size = oponent_offer%n_dim_1 * oponent_offer%n_dim_2
+        if (send_size == 0 .and. recv_size == 0) return
+
+        ! prepare sendbuffer
         allocate (send_buffer(my_offer%n_dim_1, my_offer%n_dim_2))
         do j = 1, my_offer%n_dim_2
             idx_2 = find_index(idx_list_2, my_offer%idx_list_2(j))
@@ -232,7 +251,6 @@ contains
         end do
 
         ! prepare recvbuffer
-        recv_size = oponent_offer%n_dim_1 * oponent_offer%n_dim_2
         allocate (recv_buffer(oponent_offer%n_dim_1, oponent_offer%n_dim_2))
 
         ! exchange the matrices
@@ -251,6 +269,162 @@ contains
         end do
 
     end subroutine exchange_matrix_elements
+
+
+
+    !> @brief Exchange matrix elements with the oponent using buffered communication
+    !!
+    !!        This is a memory efficient version of exchange_matrix_elements()
+    !!
+    !! @param[in] oponent_rank -- rank of the oponent
+    !! @param[in] my_offer -- my offering of indices
+    !! @param[in] oponent_offer -- oponent's offering of indices
+    !! @param[in] idx_list_1 -- global index list 1
+    !! @param[in] idx_list_2 -- global index list 2
+    !! @param[in] end_idx_list_1 -- global index list 1 (end data layout)
+    !! @param[in] end_idx_list_2 -- global index list 2 (end data layout)
+    !! @param[in] loc_mat -- local matrix
+    !! @param[inout] end_mat -- end matrix, where the results are accumulated
+    subroutine exchange_matrix_elements_buffered(oponent_rank, my_offer, oponent_offer, &
+                                                 idx_list_1, idx_list_2, &
+                                                 end_idx_list_1, end_idx_list_2, &
+                                                 loc_mat, end_mat)
+        integer, intent(in) :: oponent_rank
+        type(idx_list_package), intent(in) :: my_offer
+        type(idx_list_package), intent(in) :: oponent_offer
+        integer, dimension(:), intent(in) :: idx_list_1
+        integer, dimension(:), intent(in) :: idx_list_2
+        integer, dimension(:), intent(in) :: end_idx_list_1
+        integer, dimension(:), intent(in) :: end_idx_list_2
+        real(kind=8), dimension(:, :), intent(in) :: loc_mat
+        real(kind=8), dimension(:, :), intent(inout) :: end_mat
+
+        ! internal variables
+        real(kind=8), dimension(:), allocatable :: send_buffer
+        real(kind=8), dimension(:), allocatable :: recv_buffer
+        integer :: send_size, recv_size, steps, i_step, i_send, i_recv
+        integer :: send_msg_size, recv_msg_size, i_error
+        integer, dimension(MPI_STATUS_SIZE) :: status
+
+        send_size = my_offer%n_dim_1 * my_offer%n_dim_2
+        recv_size = oponent_offer%n_dim_1 * oponent_offer%n_dim_2
+
+        if (send_size == 0 .and. recv_size == 0) return
+
+        ! round up the division by MAX_PACKAGE_LEN
+        steps = (max(send_size, recv_size) + MAX_PACKAGE_LEN - 1)/ MAX_PACKAGE_LEN
+
+        ! prepare the buffers
+        allocate(send_buffer(MAX_PACKAGE_LEN))
+        allocate(recv_buffer(MAX_PACKAGE_LEN))
+
+        i_send = 0
+        i_recv = 0
+        do i_step = 1, steps
+            if ((i_send < send_size) .and. (i_recv < recv_size)) then
+                ! send AND receive
+
+                ! fill the send buffer
+                call prep_sendbuffer(i_send, send_msg_size)
+
+                ! send the buffer
+                call MPI_Sendrecv(send_buffer, send_msg_size, MPI_DOUBLE_PRECISION, oponent_rank, i_step, &
+                                  recv_buffer, MAX_PACKAGE_LEN, MPI_DOUBLE_PRECISION, oponent_rank, i_step, &
+                                  MPI_COMM_WORLD, status, i_error)
+                call MPI_Get_count(status, MPI_DOUBLE_PRECISION, recv_msg_size, i_error)
+
+                ! unpack the received matrix into the end_mat
+                call unpack_recvbuffer(i_recv, recv_msg_size)
+
+                i_send = i_send + send_msg_size
+                i_recv = i_recv + recv_msg_size
+
+            else if (i_send < send_size .and. (i_recv == recv_size)) then
+                ! send only
+
+                call prep_sendbuffer(i_send, send_msg_size)
+                call MPI_Send(send_buffer, send_msg_size, MPI_DOUBLE_PRECISION, oponent_rank, i_step, &
+                              MPI_COMM_WORLD, i_error)
+                i_send = i_send + send_msg_size
+
+            else if ((i_send == send_size) .and. (i_recv < recv_size)) then
+                ! receive only
+
+                call MPI_Recv(recv_buffer, MAX_PACKAGE_LEN, MPI_DOUBLE_PRECISION, oponent_rank, i_step, &
+                              MPI_COMM_WORLD, status, i_error)
+                call MPI_Get_count(status, MPI_DOUBLE_PRECISION, recv_msg_size, i_error)
+
+                call unpack_recvbuffer(i_recv, recv_msg_size)
+                i_recv = i_recv + recv_msg_size
+
+            end if
+        end do
+
+        deallocate(send_buffer)
+        deallocate(recv_buffer)
+
+    contains
+
+        subroutine prep_sendbuffer(start_idx_cmb, this_msg_size)
+            integer , intent(in) :: start_idx_cmb
+            integer, intent(out) :: this_msg_size
+
+            ! internal variables
+            integer :: i, j,  tmp_cmb_idx
+            integer :: idx_1, idx_2
+
+            send_buffer(:) = 0.0d0
+
+            tmp_cmb_idx = 0
+            this_msg_size = 0
+            do i = 1, my_offer%n_dim_1
+                do j = 1, my_offer%n_dim_2
+                    tmp_cmb_idx = tmp_cmb_idx + 1
+                    if (tmp_cmb_idx > start_idx_cmb) then
+
+                        idx_1 = find_index(idx_list_1, my_offer%idx_list_1(i))
+                        idx_2 = find_index(idx_list_2, my_offer%idx_list_2(j))
+
+                        this_msg_size = this_msg_size + 1
+
+                        send_buffer(this_msg_size) = loc_mat(idx_1, idx_2)
+
+                        if (this_msg_size == MAX_PACKAGE_LEN) return
+                    end if
+                end do
+            end do
+
+        end subroutine prep_sendbuffer
+
+        subroutine unpack_recvbuffer(start_idx_cmb, this_msg_size)
+            integer, intent(in) :: start_idx_cmb
+            integer, intent(in) :: this_msg_size
+
+            ! internal variables
+            integer :: i, j, tmp_cmb_idx
+            integer :: idx_1, idx_2, counter
+
+            tmp_cmb_idx = 0
+            counter = 0
+            do i = 1, oponent_offer%n_dim_1
+                do j = 1, oponent_offer%n_dim_2
+                    tmp_cmb_idx = tmp_cmb_idx + 1
+                    if ((tmp_cmb_idx > start_idx_cmb) .and. (counter < this_msg_size)) then
+
+                        idx_1 = find_index(end_idx_list_1, oponent_offer%idx_list_1(i))
+                        idx_2 = find_index(end_idx_list_2, oponent_offer%idx_list_2(j))
+
+                        counter = counter + 1
+                        end_mat(idx_1, idx_2) = end_mat(idx_1, idx_2) + recv_buffer(counter)
+
+                        if (counter == this_msg_size) return
+                    end if
+                end do
+            end do
+
+        end subroutine unpack_recvbuffer
+
+    end subroutine exchange_matrix_elements_buffered
 
 
 
