@@ -42,7 +42,8 @@ contains
     !! @param[in] end_idx_list_1 -- global index list 1 of the end data layout
     !! @param[in] end_idx_list_2 -- global index list 2 of the end data layout
     !! @param[out] end_mat -- end matrix, where the results are accumulated
-    subroutine sum_and_redistribute(idx_list_1, idx_list_2, loc_mat, end_idx_list_1, end_idx_list_2, end_mat)
+    subroutine sum_and_redistribute(idx_list_1, idx_list_2, loc_mat, &
+                                    end_idx_list_1, end_idx_list_2, end_mat)
         integer, dimension(:), intent(in) :: idx_list_1
         integer, dimension(:), intent(in) :: idx_list_2
         real(kind=8), dimension(:, :), intent(in) :: loc_mat
@@ -76,9 +77,8 @@ contains
         ! consistency check
 
         ! allocate and initialize the end_mat
-        if (allocated(end_mat)) deallocate (end_mat)
-        allocate(end_mat(end_n_dim_1, end_n_dim_2))
-        end_mat(:, :) = 0.0d0
+        call initialize_end_mat(idx_list_1, idx_list_2, loc_mat, &
+                                end_idx_list_1, end_idx_list_2, end_mat)
 
         ! get communication schedule
         call get_round_robin_turnament_schedule(mpi_size, mpi_rank, n_comm, comm_schedule)
@@ -87,7 +87,8 @@ contains
         call pack_idx_lists(end_idx_list_1, end_idx_list_2, end_package_len, end_package)
 
         ! get the maximum idx_list size of end data layout of all processors
-        call MPI_Allreduce(end_package_len, max_end_package_len, 1, MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, i_error)
+        call MPI_Allreduce(end_package_len, max_end_package_len, 1, MPI_INTEGER, &
+                           MPI_MAX, MPI_COMM_WORLD, i_error)
         allocate(recv_end_package(max_end_package_len))
 
         ! offering of oponent idices can only be so large as my end data layout
@@ -98,7 +99,7 @@ contains
         do i_comm = 1, n_comm
 
             oponent = comm_schedule(i_comm)
-            ! cycle if ghost oponent
+            ! skip step if oponent is a ghost
             if (oponent == -1) cycle
 
             ! communicate the end data layout
@@ -109,7 +110,8 @@ contains
             call unpack_idx_lists(recv_end_package, oponent_end)
 
             ! compute the sendbuffer layout
-            call get_sendbuffer_layout(oponent_end, idx_list_1, idx_list_2, len_offering, my_offering)
+            call get_sendbuffer_layout(oponent_end, idx_list_1, idx_list_2, &
+                                       len_offering, my_offering)
 
             ! comminicate the send layout
             call MPI_Sendrecv(my_offering, len_offering, MPI_INTEGER, oponent, i_comm, &
@@ -118,23 +120,78 @@ contains
             call unpack_idx_lists(oponent_offering, oponent_offer)
             call unpack_idx_lists(my_offering, my_offer)
 
-            ! send buffer in chunks
+            ! send and recv buffer
             call exchange_matrix_elements(oponent, my_offer, oponent_offer, &
                                           idx_list_1, idx_list_2, end_idx_list_1, end_idx_list_2, &
                                           loc_mat, end_mat)
 
         end do
 
-        deallocate (comm_schedule)
-        deallocate (end_package)
+        call print_matrix(end_mat, end_idx_list_1, end_idx_list_2)
+        !call print_matrix(loc_mat, idx_list_1, idx_list_2)
+
+        deallocate(comm_schedule)
+        deallocate(end_package)
         deallocate(my_offering)
         deallocate(recv_end_package)
         deallocate(oponent_offering)
     end subroutine sum_and_redistribute
 
+    subroutine print_matrix(mat, idx_list_1, idx_list_2)
+        real(kind=8), dimension(:, :), intent(in) :: mat
+        integer, dimension(:), intent(in) :: idx_list_1
+        integer, dimension(:), intent(in) :: idx_list_2
+        integer :: i, j, idx_1, idx_2
+
+        do i = 1, size(mat, 1)
+            idx_1 = idx_list_1(i)
+            do j = 1, size(mat, 2)
+                idx_2 = idx_list_2(j)
+                print *, idx_1, idx_2, mat(i, j)
+            end do
+        end do
+    end subroutine print_matrix
+    
+    
+
+    !> @brief allocate, initialize and fill the end matrix with the local matrix
+    !!
+    !! @param[in] idx_list_1 -- global index list 1
+    !! @param[in] idx_list_2 -- global index list 2
+    !! @param[in] loc_mat -- local matrix
+    !! @param[in] end_idx_list_1 -- global index list 1 (end data layout)
+    !! @param[in] end_idx_list_2 -- global index list 2 (end data layout)
+    !! @param[out] end_mat -- end matrix
+    subroutine initialize_end_mat(idx_list_1, idx_list_2, loc_mat, end_idx_list_1, end_idx_list_2, end_mat)
+        integer, dimension(:), intent(in) :: idx_list_1
+        integer, dimension(:), intent(in) :: idx_list_2
+        real(kind=8), dimension(:, :), intent(in) :: loc_mat
+        integer, dimension(:), intent(in) :: end_idx_list_1
+        integer, dimension(:), intent(in) :: end_idx_list_2
+        real(kind=8), dimension(:, :), allocatable, intent(out) :: end_mat
+
+        ! internal variables
+        integer :: i, j, idx_1, idx_2
+
+        allocate(end_mat(size(end_idx_list_1), size(end_idx_list_2)))
+        end_mat(:, :) = 0.0d0
+
+        ! fill the end_mat with the data from the local matrix
+        do j = 1, size(idx_list_2)
+            idx_2 = find_index(end_idx_list_2, idx_list_2(j))
+            if (idx_2 == -1) cycle
+            do i = 1, size(idx_list_1)
+                idx_1 = find_index(end_idx_list_1, idx_list_1(i))
+                if (idx_1 == -1) cycle
+                end_mat(idx_1, idx_2) = loc_mat(i, j)
+            end do
+        end do
+
+    end subroutine initialize_end_mat
 
 
-    !> @brief Exchanges matrix elements with the oponent
+
+    !> @brief Exchange matrix elements with the oponent
     !!
     !! @param[in] oponent_rank -- rank of the oponent
     !! @param[in] my_offer -- my offering of indices
@@ -178,7 +235,6 @@ contains
         recv_size = oponent_offer%n_dim_1 * oponent_offer%n_dim_2
         allocate (recv_buffer(oponent_offer%n_dim_1, oponent_offer%n_dim_2))
 
-        print *, mpi_rank, recv_size, send_size
         ! exchange the matrices
         call MPI_Sendrecv(send_buffer, send_size, MPI_DOUBLE_PRECISION, oponent_rank, 0, &
                           recv_buffer, recv_size, MPI_DOUBLE_PRECISION, oponent_rank, 0, &
@@ -206,7 +262,8 @@ contains
     !! @param[in] idx_list_2 -- my global index list 2
     !! @param[out] len_offering -- length of the resulting send buffer
     !! @param[out] my_offering -- resulting send buffer
-    subroutine get_sendbuffer_layout(oponent_end, idx_list_1, idx_list_2, len_offering, my_offering)
+    subroutine get_sendbuffer_layout(oponent_end, idx_list_1, idx_list_2, &
+                                     len_offering, my_offering)
         type(idx_list_package), intent(in) :: oponent_end
         integer, dimension(:), intent(in) :: idx_list_1
         integer, dimension(:), intent(in) :: idx_list_2
@@ -227,7 +284,8 @@ contains
                                     n_intersect_2, intersection_dim_2)
 
         ! pack the send buffer
-        call pack_idx_lists(intersection_dim_1, intersection_dim_2, len_offering, my_offering)
+        call pack_idx_lists(intersection_dim_1, intersection_dim_2, &
+                            len_offering, my_offering)
 
     end subroutine get_sendbuffer_layout
 
@@ -241,7 +299,8 @@ contains
     !! @param[in] idx_list_2 -- second list of indices
     !! @param[out] n_intersect -- number of indices in the intersection
     !! @param[out] intersection -- idices that are in both lists
-    subroutine find_list_intersection(n_1, idx_list_1, n_2, idx_list_2, n_intersect, intersection)
+    subroutine find_list_intersection(n_1, idx_list_1, n_2, idx_list_2, &
+                                      n_intersect, intersection)
         integer, intent(in) :: n_1
         integer, dimension(:), intent(in) :: idx_list_1
         integer, intent(in) :: n_2

@@ -33,9 +33,9 @@ contains
         real(kind=8), dimension(:, :), allocatable :: end_mat
 
         call build_local_matrix(n_dim1_glob, n_dim2_glob, n_dim1_loc, n_dim2_loc, &
-                                  idx_list_1, idx_list_2, loc_mat)
+                                idx_list_1, idx_list_2, loc_mat)
         call get_end_datalayout(n_dim1_glob, n_dim2_glob, end_n_dim1_loc, end_n_dim2_loc, &
-                                  end_idx_list_1, end_idx_list_2)
+                                end_idx_list_1, end_idx_list_2)
         call sum_and_redistribute(idx_list_1, idx_list_2, loc_mat, &
                                   end_idx_list_1, end_idx_list_2, end_mat)
 
@@ -65,13 +65,13 @@ contains
         do i_dim1 = mpi_rank+1, n_dim1_glob - (mpi_size - mpi_rank) +1
             counter_1 = counter_1 + 1
             idx_list_1(counter_1) = i_dim1
-            
+
             counter_2 = 0
             do i_dim2 = mpi_rank+1, n_dim2_glob - (mpi_size - mpi_rank) +1
                 counter_2 = counter_2 + 1
                 idx_list_2(counter_2) = i_dim2
 
-                loc_mat(counter_1, counter_2) = 0.0d0 + mpi_rank
+                loc_mat(counter_1, counter_2) = 1.0d0
             end do
         end do
 
