@@ -26,7 +26,7 @@ module distributed_sum
     end type idx_list_package
 
     !> max package size in real(kind=8) bit units
-    integer, parameter :: MAX_PACKAGE_LEN = 4
+    integer, parameter :: MAX_PACKAGE_LEN = 1000000
 
     !> flag for enabling buffered exchange of matrix elements (memory efficient)
     logical, parameter :: flag_exchange_buffered = .true.
@@ -84,6 +84,9 @@ contains
         call initialize_end_mat(idx_list_1, idx_list_2, loc_mat, &
                                 end_idx_list_1, end_idx_list_2, end_mat)
 
+        ! nothing to do if serial execution
+        if (mpi_size == 1) return 
+
         ! get communication schedule
         call get_round_robin_turnament_schedule(mpi_size, mpi_rank, n_comm, comm_schedule)
 
@@ -136,10 +139,11 @@ contains
                                               end_idx_list_1, end_idx_list_2, &
                                               loc_mat, end_mat)
             end if
+            if (mpi_rank == 0) print *, "step ", i_comm, "/", n_comm, " done"
 
         end do
 
-        call print_matrix(end_mat, end_idx_list_1, end_idx_list_2)
+        !call print_matrix(end_mat, end_idx_list_1, end_idx_list_2)
         !call print_matrix(loc_mat, idx_list_1, idx_list_2)
 
         deallocate(comm_schedule)
@@ -372,8 +376,6 @@ contains
             ! internal variables
             integer :: i, j,  tmp_cmb_idx
             integer :: idx_1, idx_2
-
-            send_buffer(:) = 0.0d0
 
             tmp_cmb_idx = 0
             this_msg_size = 0
