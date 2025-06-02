@@ -11,7 +11,7 @@ module distributed_sum
     private
     public :: sum_and_redistribute
 
-    !> @brief wrapper for a package containing two index lists
+    !> wrapper for a package containing two index lists
     type :: idx_list_package
         !> number of indices in the first index list
         integer :: n_dim_1
@@ -26,7 +26,7 @@ module distributed_sum
     end type idx_list_package
 
     !> max package size in real(kind=8) bit units
-    integer, parameter :: MAX_PACKAGE_LEN = 1000000
+    integer, parameter :: MAX_PACKAGE_LEN = 1024000
 
     !> flag for enabling buffered exchange of matrix elements (memory efficient)
     logical, parameter :: flag_exchange_buffered = .true.
@@ -69,6 +69,8 @@ contains
         integer, dimension(:), allocatable, target :: recv_end_package
         integer, dimension(:), allocatable, target :: oponent_offering
         integer, dimension(:), allocatable :: comm_schedule
+        integer, dimension(:), allocatable :: inv_idx_list_1, inv_idx_list_2
+        integer, dimension(:), allocatable :: inv_end_idx_list_1, inv_end_idx_list_2
         type(idx_list_package) :: oponent_end
         type(idx_list_package) :: oponent_offer
         type(idx_list_package) :: my_offer
@@ -78,11 +80,16 @@ contains
         end_n_dim_1 = size(end_idx_list_1)
         end_n_dim_2 = size(end_idx_list_2)
 
-        ! consistency check
+        ! get inverse index lists
+        call get_inv_idx_list(idx_list_1, inv_idx_list_1)
+        call get_inv_idx_list(idx_list_2, inv_idx_list_2)
+        call get_inv_idx_list(end_idx_list_1, inv_end_idx_list_1)
+        call get_inv_idx_list(end_idx_list_2, inv_end_idx_list_2)
 
         ! allocate and initialize the end_mat
         call initialize_end_mat(idx_list_1, idx_list_2, loc_mat, &
-                                end_idx_list_1, end_idx_list_2, end_mat)
+                                end_n_dim_1, end_n_dim_2, &
+                                inv_end_idx_list_1, inv_end_idx_list_2, end_mat)
 
         ! nothing to do if serial execution
         if (mpi_size == 1) return 
@@ -131,7 +138,9 @@ contains
             if (flag_exchange_buffered) then
                 call exchange_matrix_elements_buffered(oponent, my_offer, oponent_offer, &
                                                        idx_list_1, idx_list_2, &
+                                                       inv_idx_list_1, inv_idx_list_2, &
                                                        end_idx_list_1, end_idx_list_2, &
+                                                       inv_end_idx_list_1, inv_end_idx_list_2, &
                                                        loc_mat, end_mat)
             else
                 call exchange_matrix_elements(oponent, my_offer, oponent_offer, &
@@ -151,6 +160,10 @@ contains
         deallocate(my_offering)
         deallocate(recv_end_package)
         deallocate(oponent_offering)
+        deallocate(inv_idx_list_1)
+        deallocate(inv_idx_list_2)
+        deallocate(inv_end_idx_list_1)
+        deallocate(inv_end_idx_list_2)
     end subroutine sum_and_redistribute
 
 
@@ -181,28 +194,40 @@ contains
     !! @param[in] end_idx_list_1 -- global index list 1 (end data layout)
     !! @param[in] end_idx_list_2 -- global index list 2 (end data layout)
     !! @param[out] end_mat -- end matrix
-    subroutine initialize_end_mat(idx_list_1, idx_list_2, loc_mat, end_idx_list_1, end_idx_list_2, end_mat)
+    subroutine initialize_end_mat(idx_list_1, idx_list_2, loc_mat, n_end_1, n_end_2, &
+                                  inv_end_idx_list_1, inv_end_idx_list_2, end_mat)
         integer, dimension(:), intent(in) :: idx_list_1
         integer, dimension(:), intent(in) :: idx_list_2
         real(kind=8), dimension(:, :), intent(in) :: loc_mat
-        integer, dimension(:), intent(in) :: end_idx_list_1
-        integer, dimension(:), intent(in) :: end_idx_list_2
+        integer, intent(in) :: n_end_1
+        integer, intent(in) :: n_end_2
+        integer, dimension(:), intent(in) :: inv_end_idx_list_1
+        integer, dimension(:), intent(in) :: inv_end_idx_list_2
         real(kind=8), dimension(:, :), allocatable, intent(out) :: end_mat
 
         ! internal variables
-        integer :: i, j, idx_1, idx_2
+        integer :: i, j, idx_1, idx_2, max_end_idx_1, max_end_idx_2
 
-        allocate(end_mat(size(end_idx_list_1), size(end_idx_list_2)))
+        allocate(end_mat(n_end_1, n_end_2))
         end_mat(:, :) = 0.0d0
+
+        max_end_idx_1 = size(inv_end_idx_list_1)
+        max_end_idx_2 = size(inv_end_idx_list_2)
 
         ! fill the end_mat with the data from the local matrix
         do j = 1, size(idx_list_2)
-            idx_2 = find_index(end_idx_list_2, idx_list_2(j))
+
+            if (idx_list_2(j) > max_end_idx_2) cycle
+            idx_2 = inv_end_idx_list_2(idx_list_2(j))
             if (idx_2 == -1) cycle
+
             do i = 1, size(idx_list_1)
-                idx_1 = find_index(end_idx_list_1, idx_list_1(i))
+
+                if (idx_list_1(i) > max_end_idx_1) cycle
+                idx_1 = inv_end_idx_list_1(idx_list_1(i))
                 if (idx_1 == -1) cycle
                 end_mat(idx_1, idx_2) = loc_mat(i, j)
+
             end do
         end do
 
@@ -291,15 +316,21 @@ contains
     !! @param[inout] end_mat -- end matrix, where the results are accumulated
     subroutine exchange_matrix_elements_buffered(oponent_rank, my_offer, oponent_offer, &
                                                  idx_list_1, idx_list_2, &
+                                                 inv_idx_list_1, inv_idx_list_2, &
                                                  end_idx_list_1, end_idx_list_2, &
+                                                 inv_end_idx_list_1, inv_end_idx_list_2, &
                                                  loc_mat, end_mat)
         integer, intent(in) :: oponent_rank
         type(idx_list_package), intent(in) :: my_offer
         type(idx_list_package), intent(in) :: oponent_offer
         integer, dimension(:), intent(in) :: idx_list_1
         integer, dimension(:), intent(in) :: idx_list_2
+        integer, dimension(:), intent(in) :: inv_idx_list_1
+        integer, dimension(:), intent(in) :: inv_idx_list_2
         integer, dimension(:), intent(in) :: end_idx_list_1
         integer, dimension(:), intent(in) :: end_idx_list_2
+        integer, dimension(:), intent(in) :: inv_end_idx_list_1
+        integer, dimension(:), intent(in) :: inv_end_idx_list_2
         real(kind=8), dimension(:, :), intent(in) :: loc_mat
         real(kind=8), dimension(:, :), intent(inout) :: end_mat
 
@@ -317,6 +348,8 @@ contains
 
         ! round up the division by MAX_PACKAGE_LEN
         steps = (max(send_size, recv_size) + MAX_PACKAGE_LEN - 1)/ MAX_PACKAGE_LEN
+
+
 
         ! prepare the buffers
         allocate(send_buffer(MAX_PACKAGE_LEN))
@@ -380,12 +413,14 @@ contains
             tmp_cmb_idx = 0
             this_msg_size = 0
             do i = 1, my_offer%n_dim_1
+
+                idx_1 = inv_idx_list_1(my_offer%idx_list_1(i))
+
                 do j = 1, my_offer%n_dim_2
                     tmp_cmb_idx = tmp_cmb_idx + 1
                     if (tmp_cmb_idx > start_idx_cmb) then
 
-                        idx_1 = find_index(idx_list_1, my_offer%idx_list_1(i))
-                        idx_2 = find_index(idx_list_2, my_offer%idx_list_2(j))
+                        idx_2 = inv_idx_list_2(my_offer%idx_list_2(j))
 
                         this_msg_size = this_msg_size + 1
 
@@ -409,12 +444,12 @@ contains
             tmp_cmb_idx = 0
             counter = 0
             do i = 1, oponent_offer%n_dim_1
+                idx_1 = inv_end_idx_list_1(oponent_offer%idx_list_1(i))
                 do j = 1, oponent_offer%n_dim_2
                     tmp_cmb_idx = tmp_cmb_idx + 1
                     if ((tmp_cmb_idx > start_idx_cmb) .and. (counter < this_msg_size)) then
 
-                        idx_1 = find_index(end_idx_list_1, oponent_offer%idx_list_1(i))
-                        idx_2 = find_index(end_idx_list_2, oponent_offer%idx_list_2(j))
+                        idx_2 = inv_end_idx_list_2(oponent_offer%idx_list_2(j))
 
                         counter = counter + 1
                         end_mat(idx_1, idx_2) = end_mat(idx_1, idx_2) + recv_buffer(counter)
@@ -427,6 +462,29 @@ contains
         end subroutine unpack_recvbuffer
 
     end subroutine exchange_matrix_elements_buffered
+
+
+    subroutine get_inv_idx_list(idx_list, inv_idx_list)
+        integer, dimension(:), intent(in) :: idx_list 
+        integer, dimension(:), allocatable, intent(out) :: inv_idx_list
+
+        ! internal variables
+        integer :: i, n, max_idx
+
+        n = size(idx_list)
+        max_idx = maxval(idx_list)
+        allocate (inv_idx_list(max_idx))
+
+        inv_idx_list(:) = -1 
+        do i = 1, n
+            if (idx_list(i) < 1 .or. idx_list(i) > max_idx) then
+                print *, "Error: index out of bounds in get_inv_idx_list"
+                stop
+            end if
+            inv_idx_list(idx_list(i)) = i
+        end do
+
+    end subroutine get_inv_idx_list
 
 
 
