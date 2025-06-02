@@ -510,10 +510,10 @@ contains
         integer :: n_intersect_1, n_intersect_2
 
         ! get overlapping indices
-        call find_list_intersection(oponent_end%n_dim_1, oponent_end%idx_list_1, &
+        call find_list_intersection_low_scaling(oponent_end%n_dim_1, oponent_end%idx_list_1, &
                                     size(idx_list_1), idx_list_1, &
                                     n_intersect_1, intersection_dim_1)
-        call find_list_intersection(oponent_end%n_dim_2, oponent_end%idx_list_2, &
+        call find_list_intersection_low_scaling(oponent_end%n_dim_2, oponent_end%idx_list_2, &
                                     size(idx_list_2), idx_list_2, &
                                     n_intersect_2, intersection_dim_2)
 
@@ -568,6 +568,67 @@ contains
         end do
 
     end subroutine find_list_intersection
+
+    
+    
+    !> @brief find the intersection of two index lists with low scaling
+    !!
+    !!        !! the two index lists must be sorted in ascending order !!
+    !!
+    !! @param[in] n_1 -- number of indices in the first list
+    !! @param[in] idx_list_1 -- first list of indices
+    !! @param[in] n_2 -- number of indices in the second list
+    !! @param[in] idx_list_2 -- second list of indices
+    !! @param[out] n_intersect -- number of indices in the intersection
+    !! @param[out] intersection -- idices that are in both lists
+    subroutine find_list_intersection_low_scaling(n_1, idx_list_1, n_2, idx_list_2, &
+                                      n_intersect, intersection)
+        integer, intent(in) :: n_1
+        integer, dimension(:), intent(in) :: idx_list_1
+        integer, intent(in) :: n_2
+        integer, dimension(:), intent(in) :: idx_list_2
+        integer, intent(out) :: n_intersect
+        integer, dimension(:), allocatable, intent(out) :: intersection
+
+        ! internal variables
+        integer :: i, j
+        integer, dimension(:), allocatable :: tmp_intersect 
+
+        ! consistency check
+        if (n_1 == 0 .or. n_2 == 0) then
+            n_intersect = 0
+            return
+        end if
+        
+        allocate(tmp_intersect(min(n_1, n_2)))
+        n_intersect = 0
+
+        i = 1
+        j = 1
+    
+        ! Two-pointer intersection loop
+        do while (i <= n_1 .and. j <= n_2)
+            if (idx_list_1(i) < idx_list_2(j)) then
+                i = i + 1
+            else if (idx_list_1(i) > idx_list_2(j)) then
+                j = j + 1
+            else
+                ! Match found
+                n_intersect = n_intersect + 1
+                tmp_intersect(n_intersect) = idx_list_1(i)
+                i = i + 1
+                j = j + 1
+            end if
+        end do
+
+        if (n_intersect == 0) return
+
+        allocate (intersection(n_intersect))
+        intersection(:) = tmp_intersect(1:n_intersect)
+
+        deallocate(tmp_intersect)
+
+    end subroutine find_list_intersection_low_scaling
 
 
 
