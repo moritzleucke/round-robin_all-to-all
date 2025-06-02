@@ -362,7 +362,7 @@ contains
                 ! send AND receive
 
                 ! fill the send buffer
-                call prep_sendbuffer(i_send, send_msg_size)
+                call prep_sendbuffer_low_scaling(i_send, send_msg_size)
 
                 ! send the buffer
                 call MPI_Sendrecv(send_buffer, send_msg_size, MPI_DOUBLE_PRECISION, oponent_rank, i_step, &
@@ -371,7 +371,7 @@ contains
                 call MPI_Get_count(status, MPI_DOUBLE_PRECISION, recv_msg_size, i_error)
 
                 ! unpack the received matrix into the end_mat
-                call unpack_recvbuffer(i_recv, recv_msg_size)
+                call unpack_recvbuffer_low_scaling(i_recv, recv_msg_size)
 
                 i_send = i_send + send_msg_size
                 i_recv = i_recv + recv_msg_size
@@ -379,7 +379,7 @@ contains
             else if (i_send < send_size .and. (i_recv == recv_size)) then
                 ! send only
 
-                call prep_sendbuffer(i_send, send_msg_size)
+                call prep_sendbuffer_low_scaling(i_send, send_msg_size)
                 call MPI_Send(send_buffer, send_msg_size, MPI_DOUBLE_PRECISION, oponent_rank, i_step, &
                               MPI_COMM_WORLD, i_error)
                 i_send = i_send + send_msg_size
@@ -391,7 +391,7 @@ contains
                               MPI_COMM_WORLD, status, i_error)
                 call MPI_Get_count(status, MPI_DOUBLE_PRECISION, recv_msg_size, i_error)
 
-                call unpack_recvbuffer(i_recv, recv_msg_size)
+                call unpack_recvbuffer_low_scaling(i_recv, recv_msg_size)
                 i_recv = i_recv + recv_msg_size
 
             end if
@@ -433,6 +433,34 @@ contains
 
         end subroutine prep_sendbuffer
 
+        subroutine prep_sendbuffer_low_scaling(start_idx_cmb, this_msg_size)
+            integer, intent(in)  :: start_idx_cmb
+            integer, intent(out) :: this_msg_size
+        
+            ! internal variables
+            integer :: total_combinations, offset, linear_idx
+            integer :: i, j, idx_1, idx_2
+            integer :: dim1, dim2
+        
+            dim1 = my_offer%n_dim_1
+            dim2 = my_offer%n_dim_2
+        
+            total_combinations = dim1 * dim2
+            offset = start_idx_cmb
+            this_msg_size = 0
+        
+            do linear_idx = offset + 1, min(offset + MAX_PACKAGE_LEN, total_combinations)
+                i = mod(linear_idx - 1, dim1) + 1
+                j = (linear_idx - 1) / dim1 + 1
+        
+                idx_1 = inv_idx_list_1(my_offer%idx_list_1(i))
+                idx_2 = inv_idx_list_2(my_offer%idx_list_2(j))
+        
+                this_msg_size = this_msg_size + 1
+                send_buffer(this_msg_size) = loc_mat(idx_1, idx_2)
+            end do
+        end subroutine prep_sendbuffer_low_scaling
+
         subroutine unpack_recvbuffer(start_idx_cmb, this_msg_size)
             integer, intent(in) :: start_idx_cmb
             integer, intent(in) :: this_msg_size
@@ -460,6 +488,34 @@ contains
             end do
 
         end subroutine unpack_recvbuffer
+
+        subroutine unpack_recvbuffer_low_scaling(start_idx_cmb, this_msg_size)
+            integer, intent(in) :: start_idx_cmb
+            integer, intent(in) :: this_msg_size
+        
+            ! internal variables
+            integer :: total_combinations, offset, linear_idx
+            integer :: i, j, idx_1, idx_2
+            integer :: dim1, dim2
+            integer :: counter
+        
+            dim1 = oponent_offer%n_dim_1
+            dim2 = oponent_offer%n_dim_2
+            total_combinations = dim1 * dim2
+            offset = start_idx_cmb
+            counter = 0
+        
+            do linear_idx = offset + 1, min(offset + this_msg_size, total_combinations)
+                i = mod(linear_idx - 1, dim1) + 1
+                j = (linear_idx - 1) / dim1 + 1
+        
+                idx_1 = inv_end_idx_list_1(oponent_offer%idx_list_1(i))
+                idx_2 = inv_end_idx_list_2(oponent_offer%idx_list_2(j))
+        
+                counter = counter + 1
+                end_mat(idx_1, idx_2) = end_mat(idx_1, idx_2) + recv_buffer(counter)
+            end do
+        end subroutine unpack_recvbuffer_low_scaling
 
     end subroutine exchange_matrix_elements_buffered
 
@@ -570,7 +626,7 @@ contains
     end subroutine find_list_intersection
 
     
-    
+
     !> @brief find the intersection of two index lists with low scaling
     !!
     !!        !! the two index lists must be sorted in ascending order !!
