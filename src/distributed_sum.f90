@@ -80,13 +80,13 @@ contains
         end_n_dim_1 = size(end_idx_list_1)
         end_n_dim_2 = size(end_idx_list_2)
 
-        ! get inverse index lists
+        ! get inverse index lists for optimized cache usage
         call get_inv_idx_list(idx_list_1, inv_idx_list_1)
         call get_inv_idx_list(idx_list_2, inv_idx_list_2)
         call get_inv_idx_list(end_idx_list_1, inv_end_idx_list_1)
         call get_inv_idx_list(end_idx_list_2, inv_end_idx_list_2)
 
-        ! allocate and initialize the end_mat
+        ! allocate and initialize the end_mat with the local matrix
         call initialize_end_mat(idx_list_1, idx_list_2, loc_mat, &
                                 end_n_dim_1, end_n_dim_2, &
                                 inv_end_idx_list_1, inv_end_idx_list_2, end_mat)
@@ -362,7 +362,7 @@ contains
                 ! send AND receive
 
                 ! fill the send buffer
-                call prep_sendbuffer_low_scaling(i_send, send_msg_size)
+                call prep_sendbuffer_optim(i_send, send_msg_size)
 
                 ! send the buffer
                 call MPI_Sendrecv(send_buffer, send_msg_size, MPI_DOUBLE_PRECISION, oponent_rank, i_step, &
@@ -371,7 +371,7 @@ contains
                 call MPI_Get_count(status, MPI_DOUBLE_PRECISION, recv_msg_size, i_error)
 
                 ! unpack the received matrix into the end_mat
-                call unpack_recvbuffer_low_scaling(i_recv, recv_msg_size)
+                call unpack_recvbuffer_optim(i_recv, recv_msg_size)
 
                 i_send = i_send + send_msg_size
                 i_recv = i_recv + recv_msg_size
@@ -379,7 +379,7 @@ contains
             else if (i_send < send_size .and. (i_recv == recv_size)) then
                 ! send only
 
-                call prep_sendbuffer_low_scaling(i_send, send_msg_size)
+                call prep_sendbuffer_optim(i_send, send_msg_size)
                 call MPI_Send(send_buffer, send_msg_size, MPI_DOUBLE_PRECISION, oponent_rank, i_step, &
                               MPI_COMM_WORLD, i_error)
                 i_send = i_send + send_msg_size
@@ -391,7 +391,7 @@ contains
                               MPI_COMM_WORLD, status, i_error)
                 call MPI_Get_count(status, MPI_DOUBLE_PRECISION, recv_msg_size, i_error)
 
-                call unpack_recvbuffer_low_scaling(i_recv, recv_msg_size)
+                call unpack_recvbuffer_optim(i_recv, recv_msg_size)
                 i_recv = i_recv + recv_msg_size
 
             end if
@@ -433,7 +433,11 @@ contains
 
         end subroutine prep_sendbuffer
 
-        subroutine prep_sendbuffer_low_scaling(start_idx_cmb, this_msg_size)
+        !> @brief write the entries from loc_mat into the send buffer
+        !!
+        !! @param[in] start_idx_cmb -- combined start idex (linear index)
+        !! @param[out] this_msg_size -- size of the message to be sent
+        subroutine prep_sendbuffer_optim(start_idx_cmb, this_msg_size)
             integer, intent(in)  :: start_idx_cmb
             integer, intent(out) :: this_msg_size
         
@@ -459,7 +463,7 @@ contains
                 this_msg_size = this_msg_size + 1
                 send_buffer(this_msg_size) = loc_mat(idx_1, idx_2)
             end do
-        end subroutine prep_sendbuffer_low_scaling
+        end subroutine prep_sendbuffer_optim
 
         subroutine unpack_recvbuffer(start_idx_cmb, this_msg_size)
             integer, intent(in) :: start_idx_cmb
@@ -489,7 +493,11 @@ contains
 
         end subroutine unpack_recvbuffer
 
-        subroutine unpack_recvbuffer_low_scaling(start_idx_cmb, this_msg_size)
+        !> @brief unpack the received buffer and add elements to the end_mat
+        !!
+        !! @param[in] start_idx_cmb -- combined start idex (linear index)
+        !! @param[in] this_msg_size -- size of the message to be unpacked
+        subroutine unpack_recvbuffer_optim(start_idx_cmb, this_msg_size)
             integer, intent(in) :: start_idx_cmb
             integer, intent(in) :: this_msg_size
         
@@ -515,11 +523,15 @@ contains
                 counter = counter + 1
                 end_mat(idx_1, idx_2) = end_mat(idx_1, idx_2) + recv_buffer(counter)
             end do
-        end subroutine unpack_recvbuffer_low_scaling
+        end subroutine unpack_recvbuffer_optim
 
     end subroutine exchange_matrix_elements_buffered
 
 
+    !> @brief map the entry of a list to it's index
+    !!
+    !! @param[in] idx_list -- list of indices
+    !! @param[out] inv_idx_list -- list of indices mapped to their position in the idx_list
     subroutine get_inv_idx_list(idx_list, inv_idx_list)
         integer, dimension(:), intent(in) :: idx_list 
         integer, dimension(:), allocatable, intent(out) :: inv_idx_list
