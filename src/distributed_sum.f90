@@ -137,9 +137,7 @@ contains
             ! send and recv buffer
             if (flag_exchange_buffered) then
                 call exchange_matrix_elements_buffered(oponent, my_offer, oponent_offer, &
-                                                       idx_list_1, idx_list_2, &
                                                        inv_idx_list_1, inv_idx_list_2, &
-                                                       end_idx_list_1, end_idx_list_2, &
                                                        inv_end_idx_list_1, inv_end_idx_list_2, &
                                                        loc_mat, end_mat)
             else
@@ -148,11 +146,11 @@ contains
                                               end_idx_list_1, end_idx_list_2, &
                                               loc_mat, end_mat)
             end if
-            if (mpi_rank == 0) print *, "step ", i_comm, "/", n_comm, " done"
+            !if (mpi_rank == 0) print *, "step ", i_comm, "/", n_comm, " done"
 
         end do
 
-        !call print_matrix(end_mat, end_idx_list_1, end_idx_list_2)
+        call print_matrix(end_mat, end_idx_list_1, end_idx_list_2)
         !call print_matrix(loc_mat, idx_list_1, idx_list_2)
 
         deallocate(comm_schedule)
@@ -315,20 +313,14 @@ contains
     !! @param[in] loc_mat -- local matrix
     !! @param[inout] end_mat -- end matrix, where the results are accumulated
     subroutine exchange_matrix_elements_buffered(oponent_rank, my_offer, oponent_offer, &
-                                                 idx_list_1, idx_list_2, &
                                                  inv_idx_list_1, inv_idx_list_2, &
-                                                 end_idx_list_1, end_idx_list_2, &
                                                  inv_end_idx_list_1, inv_end_idx_list_2, &
                                                  loc_mat, end_mat)
         integer, intent(in) :: oponent_rank
         type(idx_list_package), intent(in) :: my_offer
         type(idx_list_package), intent(in) :: oponent_offer
-        integer, dimension(:), intent(in) :: idx_list_1
-        integer, dimension(:), intent(in) :: idx_list_2
         integer, dimension(:), intent(in) :: inv_idx_list_1
         integer, dimension(:), intent(in) :: inv_idx_list_2
-        integer, dimension(:), intent(in) :: end_idx_list_1
-        integer, dimension(:), intent(in) :: end_idx_list_2
         integer, dimension(:), intent(in) :: inv_end_idx_list_1
         integer, dimension(:), intent(in) :: inv_end_idx_list_2
         real(kind=8), dimension(:, :), intent(in) :: loc_mat
@@ -362,7 +354,7 @@ contains
                 ! send AND receive
 
                 ! fill the send buffer
-                call prep_sendbuffer_optim(i_send, send_msg_size)
+                call prep_sendbuffer(i_send, send_msg_size)
 
                 ! send the buffer
                 call MPI_Sendrecv(send_buffer, send_msg_size, MPI_DOUBLE_PRECISION, oponent_rank, i_step, &
@@ -371,7 +363,7 @@ contains
                 call MPI_Get_count(status, MPI_DOUBLE_PRECISION, recv_msg_size, i_error)
 
                 ! unpack the received matrix into the end_mat
-                call unpack_recvbuffer_optim(i_recv, recv_msg_size)
+                call unpack_recvbuffer(i_recv, recv_msg_size)
 
                 i_send = i_send + send_msg_size
                 i_recv = i_recv + recv_msg_size
@@ -379,7 +371,7 @@ contains
             else if (i_send < send_size .and. (i_recv == recv_size)) then
                 ! send only
 
-                call prep_sendbuffer_optim(i_send, send_msg_size)
+                call prep_sendbuffer(i_send, send_msg_size)
                 call MPI_Send(send_buffer, send_msg_size, MPI_DOUBLE_PRECISION, oponent_rank, i_step, &
                               MPI_COMM_WORLD, i_error)
                 i_send = i_send + send_msg_size
@@ -391,7 +383,7 @@ contains
                               MPI_COMM_WORLD, status, i_error)
                 call MPI_Get_count(status, MPI_DOUBLE_PRECISION, recv_msg_size, i_error)
 
-                call unpack_recvbuffer_optim(i_recv, recv_msg_size)
+                call unpack_recvbuffer(i_recv, recv_msg_size)
                 i_recv = i_recv + recv_msg_size
 
             end if
@@ -402,42 +394,11 @@ contains
 
     contains
 
-        subroutine prep_sendbuffer(start_idx_cmb, this_msg_size)
-            integer , intent(in) :: start_idx_cmb
-            integer, intent(out) :: this_msg_size
-
-            ! internal variables
-            integer :: i, j,  tmp_cmb_idx
-            integer :: idx_1, idx_2
-
-            tmp_cmb_idx = 0
-            this_msg_size = 0
-            do i = 1, my_offer%n_dim_1
-
-                idx_1 = inv_idx_list_1(my_offer%idx_list_1(i))
-
-                do j = 1, my_offer%n_dim_2
-                    tmp_cmb_idx = tmp_cmb_idx + 1
-                    if (tmp_cmb_idx > start_idx_cmb) then
-
-                        idx_2 = inv_idx_list_2(my_offer%idx_list_2(j))
-
-                        this_msg_size = this_msg_size + 1
-
-                        send_buffer(this_msg_size) = loc_mat(idx_1, idx_2)
-
-                        if (this_msg_size == MAX_PACKAGE_LEN) return
-                    end if
-                end do
-            end do
-
-        end subroutine prep_sendbuffer
-
         !> @brief write the entries from loc_mat into the send buffer
         !!
         !! @param[in] start_idx_cmb -- combined start idex (linear index)
         !! @param[out] this_msg_size -- size of the message to be sent
-        subroutine prep_sendbuffer_optim(start_idx_cmb, this_msg_size)
+        subroutine prep_sendbuffer(start_idx_cmb, this_msg_size)
             integer, intent(in)  :: start_idx_cmb
             integer, intent(out) :: this_msg_size
         
@@ -463,41 +424,13 @@ contains
                 this_msg_size = this_msg_size + 1
                 send_buffer(this_msg_size) = loc_mat(idx_1, idx_2)
             end do
-        end subroutine prep_sendbuffer_optim
-
-        subroutine unpack_recvbuffer(start_idx_cmb, this_msg_size)
-            integer, intent(in) :: start_idx_cmb
-            integer, intent(in) :: this_msg_size
-
-            ! internal variables
-            integer :: i, j, tmp_cmb_idx
-            integer :: idx_1, idx_2, counter
-
-            tmp_cmb_idx = 0
-            counter = 0
-            do i = 1, oponent_offer%n_dim_1
-                idx_1 = inv_end_idx_list_1(oponent_offer%idx_list_1(i))
-                do j = 1, oponent_offer%n_dim_2
-                    tmp_cmb_idx = tmp_cmb_idx + 1
-                    if ((tmp_cmb_idx > start_idx_cmb) .and. (counter < this_msg_size)) then
-
-                        idx_2 = inv_end_idx_list_2(oponent_offer%idx_list_2(j))
-
-                        counter = counter + 1
-                        end_mat(idx_1, idx_2) = end_mat(idx_1, idx_2) + recv_buffer(counter)
-
-                        if (counter == this_msg_size) return
-                    end if
-                end do
-            end do
-
-        end subroutine unpack_recvbuffer
+        end subroutine prep_sendbuffer
 
         !> @brief unpack the received buffer and add elements to the end_mat
         !!
         !! @param[in] start_idx_cmb -- combined start idex (linear index)
         !! @param[in] this_msg_size -- size of the message to be unpacked
-        subroutine unpack_recvbuffer_optim(start_idx_cmb, this_msg_size)
+        subroutine unpack_recvbuffer(start_idx_cmb, this_msg_size)
             integer, intent(in) :: start_idx_cmb
             integer, intent(in) :: this_msg_size
         
@@ -523,7 +456,7 @@ contains
                 counter = counter + 1
                 end_mat(idx_1, idx_2) = end_mat(idx_1, idx_2) + recv_buffer(counter)
             end do
-        end subroutine unpack_recvbuffer_optim
+        end subroutine unpack_recvbuffer
 
     end subroutine exchange_matrix_elements_buffered
 
@@ -578,10 +511,10 @@ contains
         integer :: n_intersect_1, n_intersect_2
 
         ! get overlapping indices
-        call find_list_intersection_low_scaling(oponent_end%n_dim_1, oponent_end%idx_list_1, &
+        call find_list_intersection(oponent_end%n_dim_1, oponent_end%idx_list_1, &
                                     size(idx_list_1), idx_list_1, &
                                     n_intersect_1, intersection_dim_1)
-        call find_list_intersection_low_scaling(oponent_end%n_dim_2, oponent_end%idx_list_2, &
+        call find_list_intersection(oponent_end%n_dim_2, oponent_end%idx_list_2, &
                                     size(idx_list_2), idx_list_2, &
                                     n_intersect_2, intersection_dim_2)
 
@@ -593,7 +526,9 @@ contains
 
 
 
-    !> @brief find the intersection of two index lists
+    !> @brief find the intersection of two index lists with low scaling
+    !!
+    !!        !! the two index lists must be sorted in ascending order !!
     !!
     !! @param[in] n_1 -- number of indices in the first list
     !! @param[in] idx_list_1 -- first list of indices
@@ -612,59 +547,12 @@ contains
 
         ! internal variables
         integer :: i, j
-
-        ! get the number of overlapping indices
-        n_intersect = 0
-        do i = 1, n_1
-            do j = 1, n_2
-                if (idx_list_1(i) == idx_list_2(j)) then
-                    n_intersect = n_intersect + 1
-                end if
-            end do
-        end do
-
-        allocate (intersection(n_intersect))
-
-        n_intersect = 0
-        do i = 1, n_1
-            do j = 1, n_2
-                if (idx_list_1(i) == idx_list_2(j)) then
-                    n_intersect = n_intersect + 1
-                    intersection(n_intersect) = idx_list_1(i)
-                end if
-            end do
-        end do
-
-    end subroutine find_list_intersection
-
-    
-
-    !> @brief find the intersection of two index lists with low scaling
-    !!
-    !!        !! the two index lists must be sorted in ascending order !!
-    !!
-    !! @param[in] n_1 -- number of indices in the first list
-    !! @param[in] idx_list_1 -- first list of indices
-    !! @param[in] n_2 -- number of indices in the second list
-    !! @param[in] idx_list_2 -- second list of indices
-    !! @param[out] n_intersect -- number of indices in the intersection
-    !! @param[out] intersection -- idices that are in both lists
-    subroutine find_list_intersection_low_scaling(n_1, idx_list_1, n_2, idx_list_2, &
-                                      n_intersect, intersection)
-        integer, intent(in) :: n_1
-        integer, dimension(:), intent(in) :: idx_list_1
-        integer, intent(in) :: n_2
-        integer, dimension(:), intent(in) :: idx_list_2
-        integer, intent(out) :: n_intersect
-        integer, dimension(:), allocatable, intent(out) :: intersection
-
-        ! internal variables
-        integer :: i, j
         integer, dimension(:), allocatable :: tmp_intersect 
 
         ! consistency check
         if (n_1 == 0 .or. n_2 == 0) then
             n_intersect = 0
+            allocate(intersection(0))
             return
         end if
         
@@ -696,7 +584,7 @@ contains
 
         deallocate(tmp_intersect)
 
-    end subroutine find_list_intersection_low_scaling
+    end subroutine find_list_intersection
 
 
 
@@ -723,7 +611,17 @@ contains
 
         n_dim_1 = size(idx_list_1)
         n_dim_2 = size(idx_list_2)
-        package_len = n_dim_1 + n_dim_2 + 2
+
+        ! check for empty index lists
+        if (n_dim_1 == 0 .or. n_dim_2 == 0) then
+            package_len = 2
+            allocate (package(package_len))
+            package(1) = 0
+            package(2) = 0
+            return
+        else 
+            package_len = n_dim_1 + n_dim_2 + 2
+        end if
 
         ! allocate and initialize the package
         allocate (package(package_len))
@@ -731,6 +629,7 @@ contains
         ! write the dimensions in the head
         package(1) = n_dim_1
         package(2) = n_dim_2
+
         ! copy the idx_list_1 and idx_list_2 into the package
         package(3:n_dim_1 + 2) = idx_list_1(:)
         package(n_dim_1 + 3:package_len) = idx_list_2(:)
@@ -763,6 +662,12 @@ contains
         ! Assign metadata
         pkg%n_dim_1 = n1
         pkg%n_dim_2 = n2
+
+        if (n1 ==0 .or. n2 == 0) then 
+            pkg%n_dim_1 = 0
+            pkg%n_dim_2 = 0
+            return 
+        end if 
 
         ! Point to full package
         pkg%package => package_in
